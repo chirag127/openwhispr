@@ -294,6 +294,10 @@ export function getModelProvider(modelId: string): string {
     return "custom";
   }
 
+  if (storedProvider === "openrouter") {
+    return "openrouter";
+  }
+
   if (isEnterpriseProvider(storedProvider)) {
     return storedProvider;
   }

@@ -1,4 +1,13 @@
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
+const { BYOK_API_KEYS } = require("./src/config/secretKeys");
+
+// BYOK API-key bridges (getOpenAIKey/saveOpenAIKey/… for every provider in the
+// shared manifest) built once instead of hand-listed per key.
+const secretKeyApi = {};
+for (const k of BYOK_API_KEYS) {
+  secretKeyApi[k.get] = () => ipcRenderer.invoke(`get-${k.base}-key`);
+  secretKeyApi[k.save] = (key) => ipcRenderer.invoke(`save-${k.base}-key`, key);
+}
 
 /**
  * Helper to register an IPC listener and return a cleanup function.
@@ -184,9 +193,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return () => ipcRenderer.removeListener("transcription-updated", listener);
   },
 
-  // Environment variables
-  getOpenAIKey: () => ipcRenderer.invoke("get-openai-key"),
-  saveOpenAIKey: (key) => ipcRenderer.invoke("save-openai-key", key),
+  // BYOK API keys (get/save for every provider in the secretKeys manifest)
+  ...secretKeyApi,
 
   // Clipboard functions
   checkAccessibilityPermission: (silent) =>
@@ -341,29 +349,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
   modelCancelDownload: (modelId) => ipcRenderer.invoke("model-cancel-download", modelId),
   onModelDownloadProgress: registerListener("model-download-progress"),
 
-  // Anthropic API
-  getAnthropicKey: () => ipcRenderer.invoke("get-anthropic-key"),
-  saveAnthropicKey: (key) => ipcRenderer.invoke("save-anthropic-key", key),
   getUiLanguage: () => ipcRenderer.invoke("get-ui-language"),
   saveUiLanguage: (language) => ipcRenderer.invoke("save-ui-language", language),
   setUiLanguage: (language) => ipcRenderer.invoke("set-ui-language", language),
 
-  // Gemini API
-  getGeminiKey: () => ipcRenderer.invoke("get-gemini-key"),
-  saveGeminiKey: (key) => ipcRenderer.invoke("save-gemini-key", key),
-
-  // Groq API
-  getGroqKey: () => ipcRenderer.invoke("get-groq-key"),
-  saveGroqKey: (key) => ipcRenderer.invoke("save-groq-key", key),
-
-  // xAI API
-  getXaiKey: () => ipcRenderer.invoke("get-xai-key"),
-  saveXaiKey: (key) => ipcRenderer.invoke("save-xai-key", key),
+  // xAI / Mistral transcription proxies (keys handled by the manifest bridge)
   proxyXaiTranscription: (data) => ipcRenderer.invoke("proxy-xai-transcription", data),
-
-  // Mistral API
-  getMistralKey: () => ipcRenderer.invoke("get-mistral-key"),
-  saveMistralKey: (key) => ipcRenderer.invoke("save-mistral-key", key),
   proxyMistralTranscription: (data) => ipcRenderer.invoke("proxy-mistral-transcription", data),
 
   // Corti API

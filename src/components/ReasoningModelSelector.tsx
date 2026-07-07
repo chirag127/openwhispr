@@ -14,7 +14,7 @@ import ModelCardList from "./ui/ModelCardList";
 import LocalModelPicker, { type LocalProvider } from "./LocalModelPicker";
 import { ProviderTabs } from "./ui/ProviderTabs";
 import OpenAICompatiblePanel from "./OpenAICompatiblePanel";
-import { API_ENDPOINTS, normalizeBaseUrl } from "../config/constants";
+import { API_ENDPOINTS } from "../config/constants";
 import logger from "../utils/logger";
 import { REASONING_PROVIDERS } from "../models/ModelRegistry";
 import { modelRegistry } from "../models/ModelRegistry";
@@ -37,20 +37,6 @@ const OPENROUTER_TAB = "openrouter";
 const OPENROUTER_KEYS_URL = "https://openrouter.ai/keys";
 
 const CLOUD_PROVIDER_IDS = ["openai", "anthropic", "gemini", "groq", OPENROUTER_TAB, "custom"];
-
-// OpenRouter is the custom (OpenAI-compatible) provider pinned to its endpoint,
-// surfaced as its own tab. Map between the tab id and the persisted provider.
-function tabToStored(tab: string): { provider: string; baseUrl?: string } {
-  return tab === OPENROUTER_TAB
-    ? { provider: "custom", baseUrl: API_ENDPOINTS.OPENROUTER_BASE }
-    : { provider: tab };
-}
-function storedToTab(provider: string, baseUrl: string): string {
-  if (provider === "custom" && normalizeBaseUrl(baseUrl) === API_ENDPOINTS.OPENROUTER_BASE) {
-    return OPENROUTER_TAB;
-  }
-  return provider;
-}
 
 interface ReasoningModelSelectorProps {
   reasoningModel: string;
@@ -337,6 +323,8 @@ export default function ReasoningModelSelector({
   const setGeminiApiKey = useSettingsStore((s) => s.setGeminiApiKey);
   const groqApiKey = useSettingsStore((s) => s.groqApiKey);
   const setGroqApiKey = useSettingsStore((s) => s.setGroqApiKey);
+  const openrouterApiKey = useSettingsStore((s) => s.openrouterApiKey);
+  const setOpenrouterApiKey = useSettingsStore((s) => s.setOpenrouterApiKey);
   const [selectedMode, setSelectedMode] = useState<"cloud" | "local">(mode || "cloud");
   const [selectedCloudProvider, setSelectedCloudProvider] = useState("openai");
   const [selectedLocalProvider, setSelectedLocalProvider] = useState("qwen");
@@ -408,9 +396,9 @@ export default function ReasoningModelSelector({
       setSelectedLocalProvider(localReasoningProvider);
     } else if (CLOUD_PROVIDER_IDS.includes(localReasoningProvider)) {
       setSelectedMode("cloud");
-      setSelectedCloudProvider(storedToTab(localReasoningProvider, cloudReasoningBaseUrl));
+      setSelectedCloudProvider(localReasoningProvider);
     }
-  }, [localProviders, localReasoningProvider, cloudReasoningBaseUrl]);
+  }, [localProviders, localReasoningProvider]);
 
   const [downloadedModels, setDownloadedModels] = useState<Set<string>>(new Set());
 
@@ -442,13 +430,13 @@ export default function ReasoningModelSelector({
 
     if (newMode === "cloud") {
       window.electronAPI?.llamaServerStop?.();
-      const { provider, baseUrl } = tabToStored(selectedCloudProvider);
-      setLocalReasoningProvider(provider);
-      if (baseUrl !== undefined) setCloudReasoningBaseUrl(baseUrl);
+      setLocalReasoningProvider(selectedCloudProvider);
 
-      if (provider === "custom") return;
+      // Custom/OpenRouter use a dynamically fetched model list — don't preset one.
+      if (selectedCloudProvider === "custom" || selectedCloudProvider === OPENROUTER_TAB) return;
 
-      const providerData = REASONING_PROVIDERS[provider as keyof typeof REASONING_PROVIDERS];
+      const providerData =
+        REASONING_PROVIDERS[selectedCloudProvider as keyof typeof REASONING_PROVIDERS];
       if (providerData?.models?.length > 0) {
         setReasoningModel(providerData.models[0].value);
       }
@@ -468,22 +456,12 @@ export default function ReasoningModelSelector({
     }
   };
 
-  const handleCloudProviderChange = (tab: string) => {
-    setSelectedCloudProvider(tab);
-    const { provider, baseUrl } = tabToStored(tab);
+  const handleCloudProviderChange = (provider: string) => {
+    setSelectedCloudProvider(provider);
     setLocalReasoningProvider(provider);
 
-    if (baseUrl !== undefined) {
-      setCloudReasoningBaseUrl(baseUrl);
-    } else if (
-      tab === "custom" &&
-      normalizeBaseUrl(cloudReasoningBaseUrl) === API_ENDPOINTS.OPENROUTER_BASE
-    ) {
-      // Leaving OpenRouter for a generic endpoint — clear the pinned URL.
-      setCloudReasoningBaseUrl(API_ENDPOINTS.OPENAI_BASE);
-    }
-
-    if (provider === "custom") return;
+    // Custom/OpenRouter use a dynamically fetched model list — don't preset one.
+    if (provider === "custom" || provider === OPENROUTER_TAB) return;
 
     const providerData = REASONING_PROVIDERS[provider as keyof typeof REASONING_PROVIDERS];
     if (providerData?.models?.length > 0) {
@@ -547,7 +525,18 @@ export default function ReasoningModelSelector({
           />
 
           <div>
-            {selectedCloudProvider === "custom" || selectedCloudProvider === OPENROUTER_TAB ? (
+            {selectedCloudProvider === OPENROUTER_TAB ? (
+              <OpenAICompatiblePanel
+                baseUrl={API_ENDPOINTS.OPENROUTER_BASE}
+                setBaseUrl={() => {}}
+                apiKey={openrouterApiKey}
+                setApiKey={setOpenrouterApiKey}
+                model={reasoningModel}
+                setModel={setReasoningModel}
+                lockedBaseUrl
+                getKeyUrl={OPENROUTER_KEYS_URL}
+              />
+            ) : selectedCloudProvider === "custom" ? (
               <OpenAICompatiblePanel
                 baseUrl={cloudReasoningBaseUrl}
                 setBaseUrl={setCloudReasoningBaseUrl}
@@ -555,9 +544,7 @@ export default function ReasoningModelSelector({
                 setApiKey={setCustomReasoningApiKey || (() => {})}
                 model={reasoningModel}
                 setModel={setReasoningModel}
-                {...(selectedCloudProvider === OPENROUTER_TAB
-                  ? { lockedBaseUrl: true, getKeyUrl: OPENROUTER_KEYS_URL }
-                  : { defaultBaseUrl: API_ENDPOINTS.OPENAI_BASE })}
+                defaultBaseUrl={API_ENDPOINTS.OPENAI_BASE}
               />
             ) : (
               <>

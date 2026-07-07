@@ -123,6 +123,7 @@ export const openaiProvider: InferenceProvider = {
   async call({ text, model, agentName, config, ctx }) {
     const resolvedProvider = config.provider || getSettings().cleanupProvider || "";
     const isCustomProvider = resolvedProvider === "custom";
+    const isOpenRouter = resolvedProvider === "openrouter";
 
     logger.logReasoning("OPENAI_START", {
       model,
@@ -131,7 +132,9 @@ export const openaiProvider: InferenceProvider = {
     });
 
     const overrideKey = isCustomProvider ? config.customApiKey?.trim() : "";
-    const apiKey = overrideKey || (await ctx.getApiKey(isCustomProvider ? "custom" : "openai"));
+    const apiKey =
+      overrideKey ||
+      (await ctx.getApiKey(isCustomProvider ? "custom" : isOpenRouter ? "openrouter" : "openai"));
 
     logger.logReasoning("OPENAI_API_KEY", {
       hasApiKey: !!apiKey,
@@ -144,7 +147,9 @@ export const openaiProvider: InferenceProvider = {
       { role: "user", content: text },
     ];
 
-    const openAiBase = config.baseUrl?.trim() || getConfiguredOpenAIBase();
+    const openAiBase = isOpenRouter
+      ? API_ENDPOINTS.OPENROUTER_BASE
+      : config.baseUrl?.trim() || getConfiguredOpenAIBase();
     await detectServerType(openAiBase);
     const endpointCandidates = getEndpointCandidates(openAiBase);
     const isCustomEndpoint = openAiBase !== API_ENDPOINTS.OPENAI_BASE;
