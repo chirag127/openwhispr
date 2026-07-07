@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Search } from "lucide-react";
@@ -22,13 +22,15 @@ function providerPrefix(value: string): string | null {
   return slash > 0 ? value.slice(0, slash) : null;
 }
 
-// The group header already names the provider, so drop the "provider/" prefix
-// from the label and show the provider's icon on the row instead.
-function toDisplayOption(model: ModelCardOption): ModelCardOption {
+// Resolve the provider icon from the "provider/" prefix. Group rows drop the
+// prefix from the label (the header already names the provider); the pinned
+// "Selected" row keeps the full id so its provider stays identifiable.
+function toDisplayOption(model: ModelCardOption, stripPrefix: boolean): ModelCardOption {
   const prefix = providerPrefix(model.value);
   if (!prefix) return model;
   const { icon, invertInDark } = getRemoteProviderIcon(prefix);
-  return { ...model, label: model.value.slice(prefix.length + 1), icon, invertInDark };
+  const label = stripPrefix ? model.value.slice(prefix.length + 1) : model.label;
+  return { ...model, label, icon, invertInDark };
 }
 
 interface SearchableModelListProps {
@@ -44,6 +46,7 @@ export default function SearchableModelList({
 }: SearchableModelListProps) {
   const { t } = useTranslation();
   const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(-1);
   const scrollRef = useRef<HTMLDivElement>(null);
   const normalizedQuery = query.trim().toLowerCase();
 
@@ -52,7 +55,7 @@ export default function SearchableModelList({
     [models, selectedModel]
   );
 
-  const rows = useMemo<Row[]>(() => {
+  const { rows, matchCount } = useMemo(() => {
     const groups = new Map<string, ModelCardOption[]>();
     for (const model of models) {
       if (model.value === selectedModel) continue; // pinned separately
@@ -78,6 +81,7 @@ export default function SearchableModelList({
     });
 
     const result: Row[] = [];
+    let matched = 0;
     if (selectedOption) {
       result.push({
         type: "header",
@@ -88,7 +92,7 @@ export default function SearchableModelList({
       result.push({
         type: "model",
         key: `m:${selectedOption.value}`,
-        data: toDisplayOption(selectedOption),
+        data: toDisplayOption(selectedOption, false),
       });
     }
     for (const key of sortedKeys) {
@@ -100,18 +104,60 @@ export default function SearchableModelList({
         count: bucket.length,
       });
       for (const model of bucket) {
-        result.push({ type: "model", key: `m:${model.value}`, data: toDisplayOption(model) });
+        result.push({ type: "model", key: `m:${model.value}`, data: toDisplayOption(model, true) });
+        matched += 1;
       }
     }
-    return result;
+    return { rows: result, matchCount: matched };
   }, [models, selectedModel, selectedOption, normalizedQuery, t]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: (index) => (rows[index].type === "header" ? 30 : 40),
+    getItemKey: (index) => rows[index].key,
     overscan: 8,
   });
+
+  // Reset scroll + keyboard cursor whenever the filtered result set changes.
+  useEffect(() => {
+    setActiveIndex(-1);
+    virtualizer.scrollToOffset(0);
+  }, [normalizedQuery, virtualizer]);
+
+  const moveActive = (direction: 1 | -1) => {
+    const step = (from: number) => {
+      for (let i = from + direction; i >= 0 && i < rows.length; i += direction) {
+        if (rows[i].type === "model") return i;
+      }
+      return -1;
+    };
+    const next = step(activeIndex < 0 && direction < 0 ? rows.length : activeIndex);
+    if (next >= 0) {
+      setActiveIndex(next);
+      virtualizer.scrollToIndex(next, { align: "auto" });
+    }
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveActive(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveActive(-1);
+    } else if (event.key === "Enter" && activeIndex >= 0) {
+      const row = rows[activeIndex];
+      if (row?.type === "model") {
+        event.preventDefault();
+        onModelSelect(row.data.value);
+      }
+    }
+  };
+
+  const activeRow = activeIndex >= 0 ? rows[activeIndex] : undefined;
+  const activeId = activeRow?.type === "model" ? `model-opt-${activeRow.data.value}` : undefined;
+  const showEmpty = normalizedQuery.length > 0 && matchCount === 0;
 
   return (
     <div className="space-y-2">
@@ -123,21 +169,28 @@ export default function SearchableModelList({
         <Input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={handleKeyDown}
           placeholder={t("reasoning.custom.searchPlaceholder")}
           aria-label={t("reasoning.custom.searchPlaceholder")}
+          role="combobox"
+          aria-expanded={rows.length > 0}
+          aria-controls="model-listbox"
+          aria-activedescendant={activeId}
           className="h-9 pl-8 text-sm"
         />
       </div>
 
-      {rows.length === 0 ? (
-        <p className="text-xs text-muted-foreground py-3 text-center">
-          {t("reasoning.custom.noSearchResults", { query: query.trim() })}
-        </p>
-      ) : (
+      {rows.length > 0 && (
         <div ref={scrollRef} className="overflow-y-auto pr-0.5 max-h-80">
-          <div style={{ height: virtualizer.getTotalSize(), width: "100%", position: "relative" }}>
+          <div
+            id="model-listbox"
+            role="listbox"
+            aria-label={t("reasoning.custom.searchPlaceholder")}
+            style={{ height: virtualizer.getTotalSize(), width: "100%", position: "relative" }}
+          >
             {virtualizer.getVirtualItems().map((virtualItem) => {
               const row = rows[virtualItem.index];
+              const isActive = virtualItem.index === activeIndex;
               return (
                 <div
                   key={row.key}
@@ -161,7 +214,12 @@ export default function SearchableModelList({
                       </span>
                     </div>
                   ) : (
-                    <div className="pb-0.5">
+                    <div
+                      id={`model-opt-${row.data.value}`}
+                      role="option"
+                      aria-selected={row.data.value === selectedModel}
+                      className={`pb-0.5 rounded-md ${isActive ? "ring-1 ring-primary/50" : ""}`}
+                    >
                       <ModelCard
                         model={row.data}
                         isSelected={row.data.value === selectedModel}
@@ -175,6 +233,12 @@ export default function SearchableModelList({
             })}
           </div>
         </div>
+      )}
+
+      {showEmpty && (
+        <p className="text-xs text-muted-foreground py-3 text-center">
+          {t("reasoning.custom.noSearchResults", { query: query.trim() })}
+        </p>
       )}
     </div>
   );

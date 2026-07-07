@@ -1,10 +1,21 @@
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
-const { BYOK_API_KEYS } = require("./src/config/secretKeys");
 
-// BYOK API-key bridges (getOpenAIKey/saveOpenAIKey/… for every provider in the
-// shared manifest) built once instead of hand-listed per key.
+// BYOK API-key bridges, built once instead of hand-listed per key. Sandboxed
+// preloads can't require local modules, so the {base, get, save} tuples are
+// inlined here; keep them in sync with the BYOK_API_KEYS manifest in
+// src/config/secretKeys.js (the main process derives its plumbing from that).
+const BYOK_KEY_BRIDGES = [
+  { base: "openai", get: "getOpenAIKey", save: "saveOpenAIKey" },
+  { base: "anthropic", get: "getAnthropicKey", save: "saveAnthropicKey" },
+  { base: "gemini", get: "getGeminiKey", save: "saveGeminiKey" },
+  { base: "groq", get: "getGroqKey", save: "saveGroqKey" },
+  { base: "xai", get: "getXaiKey", save: "saveXaiKey" },
+  { base: "mistral", get: "getMistralKey", save: "saveMistralKey" },
+  { base: "openrouter", get: "getOpenrouterKey", save: "saveOpenrouterKey" },
+  { base: "tinfoil", get: "getTinfoilKey", save: "saveTinfoilKey" },
+];
 const secretKeyApi = {};
-for (const k of BYOK_API_KEYS) {
+for (const k of BYOK_KEY_BRIDGES) {
   secretKeyApi[k.get] = () => ipcRenderer.invoke(`get-${k.base}-key`);
   secretKeyApi[k.save] = (key) => ipcRenderer.invoke(`save-${k.base}-key`, key);
 }
@@ -69,6 +80,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const listener = (_event, words) => callback?.(words);
     ipcRenderer.on("dictionary-updated", listener);
     return () => ipcRenderer.removeListener("dictionary-updated", listener);
+  },
+  getSnippets: () => ipcRenderer.invoke("db-get-snippets"),
+  setSnippets: (snippets) => ipcRenderer.invoke("db-set-snippets", snippets),
+  onSnippetsUpdated: (callback) => {
+    const listener = (_event, snippets) => callback?.(snippets);
+    ipcRenderer.on("snippets-updated", listener);
+    return () => ipcRenderer.removeListener("snippets-updated", listener);
   },
   setAutoLearnEnabled: (enabled) => ipcRenderer.send("auto-learn-changed", enabled),
   onCorrectionsLearned: (callback) => {
@@ -225,7 +243,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // CUDA GPU acceleration
   listGpus: () => ipcRenderer.invoke("list-gpus"),
-  setGpuDeviceIndex: (purpose, index) => ipcRenderer.invoke("set-gpu-device-index", purpose, index),
+  setGpuDeviceIndex: (purpose, uuid) => ipcRenderer.invoke("set-gpu-device-index", purpose, uuid),
   getGpuDeviceIndex: (purpose) => ipcRenderer.invoke("get-gpu-device-index", purpose),
   detectGpu: () => ipcRenderer.invoke("detect-gpu"),
   getCudaWhisperStatus: () => ipcRenderer.invoke("get-cuda-whisper-status"),
@@ -842,6 +860,25 @@ contextBridge.exposeInMainWorld("electronAPI", {
   hardDeleteDictionary: (id) => ipcRenderer.invoke("db-hard-delete-dictionary", id),
   clearDictionaryCloudId: (id) => ipcRenderer.invoke("db-clear-dictionary-cloud-id", id),
   broadcastDictionaryUpdated: () => ipcRenderer.invoke("db-broadcast-dictionary-updated"),
+
+  getPendingSnippets: () => ipcRenderer.invoke("db-get-pending-snippets"),
+  getPendingSnippetDeletes: () => ipcRenderer.invoke("db-get-pending-snippet-deletes"),
+  getSnippetForCloudMerge: (cloudEntry) =>
+    ipcRenderer.invoke("db-get-snippet-for-cloud-merge", cloudEntry),
+  upsertSnippetFromCloud: (cloudEntry) =>
+    ipcRenderer.invoke("db-upsert-snippet-from-cloud", cloudEntry),
+  markSnippetSynced: (id, cloudId, serverUpdatedAt, expectedTrigger, expectedReplacement) =>
+    ipcRenderer.invoke(
+      "db-mark-snippet-synced",
+      id,
+      cloudId,
+      serverUpdatedAt,
+      expectedTrigger,
+      expectedReplacement
+    ),
+  hardDeleteSnippet: (id) => ipcRenderer.invoke("db-hard-delete-snippet", id),
+  clearSnippetCloudId: (id) => ipcRenderer.invoke("db-clear-snippet-cloud-id", id),
+  broadcastSnippetsUpdated: () => ipcRenderer.invoke("db-broadcast-snippets-updated"),
 
   // Google Calendar
   gcalStartOAuth: () => ipcRenderer.invoke("gcal-start-oauth"),

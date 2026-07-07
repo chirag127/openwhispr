@@ -437,6 +437,7 @@ export interface SettingsState
   transcriptionMode: InferenceMode;
   remoteTranscriptionType: SelfHostedType;
   remoteTranscriptionUrl: string;
+  remoteTranscriptionModel: string;
   cleanupMode: InferenceMode;
   cleanupRemoteUrl: string;
 
@@ -497,6 +498,7 @@ export interface SettingsState
   setTranscriptionMode: (mode: InferenceMode) => void;
   setRemoteTranscriptionType: (type: SelfHostedType) => void;
   setRemoteTranscriptionUrl: (url: string) => void;
+  setRemoteTranscriptionModel: (model: string) => void;
   setCleanupMode: (mode: InferenceMode) => void;
   setCleanupRemoteUrl: (url: string) => void;
 
@@ -552,6 +554,7 @@ export interface SettingsState
   setCustomDictionary: (words: string[]) => void;
   applyCustomDictionaryFromExternal: (words: string[]) => void;
   setSnippets: (snippets: Snippet[]) => void;
+  applySnippetsFromExternal: (snippets: Snippet[]) => void;
   setAssemblyAiStreaming: (value: boolean) => void;
   setAutoGenerateNoteTitle: (value: boolean) => void;
   setUseCleanupModel: (value: boolean) => void;
@@ -569,6 +572,7 @@ export interface SettingsState
   setOpenrouterApiKey: (key: string) => void;
   setCortiClientId: (key: string) => void;
   setCortiClientSecret: (key: string) => void;
+  setTinfoilApiKey: (key: string) => void;
   setCustomTranscriptionApiKey: (key: string) => void;
   setCleanupCustomApiKey: (key: string) => void;
 
@@ -690,8 +694,7 @@ function createRegisteredHotkeySetter(
   key: "chatAgentKey" | "voiceAgentKey",
   label: string,
   getRegisterFn: () =>
-    | ((hotkey: string) => Promise<{ success: boolean; message: string }>)
-    | undefined,
+    ((hotkey: string) => Promise<{ success: boolean; message: string }>) | undefined,
   fallbackSave?: (hotkey: string) => void
 ) {
   return (hotkey: string) => {
@@ -761,6 +764,7 @@ const SECRET_IPC_SAVERS = {
   openrouter: "saveOpenrouterKey",
   cortiClientId: "saveCortiClientId",
   cortiClientSecret: "saveCortiClientSecret",
+  tinfoil: "saveTinfoilKey",
   customTranscription: "saveCustomTranscriptionKey",
   cleanupCustom: "saveCleanupCustomKey",
   bedrockAccessKeyId: "saveBedrockAccessKeyId",
@@ -780,8 +784,7 @@ function debouncedSaveSecret(provider: SecretProvider, key: string) {
   secretSaveTimers[provider] = setTimeout(() => {
     const api = window.electronAPI;
     const save = api?.[SECRET_IPC_SAVERS[provider]] as
-      | ((k: string) => Promise<unknown>)
-      | undefined;
+      ((k: string) => Promise<unknown>) | undefined;
     save?.(key)?.catch((err) => {
       logger.warn(
         "Failed to persist secret",
@@ -802,6 +805,7 @@ const STALE_SECRET_LOCALSTORAGE_KEYS = [
   "openrouterApiKey",
   "cortiClientId",
   "cortiClientSecret",
+  "tinfoilApiKey",
   "customTranscriptionApiKey",
   "customReasoningApiKey",
   "cleanupCustomApiKey",
@@ -813,7 +817,8 @@ const STALE_SECRET_LOCALSTORAGE_KEYS = [
 ] as const;
 
 function invalidateApiKeyCaches(
-  provider?: "openai" | "anthropic" | "gemini" | "groq" | "mistral" | "custom" | "openrouter"
+  provider?:
+    "openai" | "anthropic" | "gemini" | "groq" | "mistral" | "tinfoil" | "custom" | "openrouter"
 ) {
   if (provider) {
     if (_ReasoningService) {
@@ -898,6 +903,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
   openrouterApiKey: "",
   cortiClientId: "",
   cortiClientSecret: "",
+  tinfoilApiKey: "",
   customTranscriptionApiKey: "",
   cleanupCustomApiKey: "",
 
@@ -926,8 +932,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
     ? "side-panel"
     : "full-width") as "side-panel" | "full-width",
   activationMode: (readString("activationMode", "tap") === "push" ? "push" : "tap") as
-    | "tap"
-    | "push",
+    "tap" | "push",
 
   preferBuiltInMic: readBoolean("preferBuiltInMic", true),
   selectedMicDeviceId: readString("selectedMicDeviceId", ""),
@@ -1016,6 +1021,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
     return v === "openai-compatible" ? "openai-compatible" : ("lan" as SelfHostedType);
   })(),
   remoteTranscriptionUrl: readString("remoteTranscriptionUrl", ""),
+  remoteTranscriptionModel: readString("remoteTranscriptionModel", ""),
   cleanupMode: (() => {
     const v = readString("cleanupMode", "openwhispr");
     if (
@@ -1093,6 +1099,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
     type: SelfHostedType
   ) => void,
   setRemoteTranscriptionUrl: createStringSetter("remoteTranscriptionUrl"),
+  setRemoteTranscriptionModel: createStringSetter("remoteTranscriptionModel"),
   setCleanupMode: createStringSetter("cleanupMode") as (mode: InferenceMode) => void,
   setCleanupRemoteUrl: createStringSetter("cleanupRemoteUrl"),
 
@@ -1258,6 +1265,26 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
   setSnippets: (snippets: Snippet[]) => {
     if (isBrowser) localStorage.setItem("snippets", JSON.stringify(snippets));
     set({ snippets });
+    window.electronAPI
+      ?.setSnippets?.(snippets)
+      .then(() => {
+        void import("../services/SyncService.js").then(({ syncService }) => {
+          if (syncService.canSync()) void syncService.syncSnippetsNow();
+        });
+      })
+      .catch((err) => {
+        logger.warn(
+          "Failed to sync snippets to SQLite",
+          { error: (err as Error).message },
+          "settings"
+        );
+      });
+  },
+
+  // For broadcasts from main process — DB is already authoritative, only update UI.
+  applySnippetsFromExternal: (snippets: Snippet[]) => {
+    if (isBrowser) localStorage.setItem("snippets", JSON.stringify(snippets));
+    set({ snippets });
   },
 
   setUiLanguage: (language: string) => {
@@ -1295,6 +1322,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
   },
   setCortiEnvironment: createStringSetter("cortiEnvironment"),
   setCortiTenant: createStringSetter("cortiTenant"),
+  setTinfoilApiKey: createSecretSetter("tinfoilApiKey", "tinfoil", "tinfoil"),
   setCustomTranscriptionApiKey: (key: string) => {
     set({ customTranscriptionApiKey: key });
     debouncedSaveSecret("customTranscription", key);
@@ -1683,6 +1711,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
     if (keys.mistralApiKey !== undefined) s.setMistralApiKey(keys.mistralApiKey);
     if (keys.cortiClientId !== undefined) s.setCortiClientId(keys.cortiClientId);
     if (keys.cortiClientSecret !== undefined) s.setCortiClientSecret(keys.cortiClientSecret);
+    if (keys.tinfoilApiKey !== undefined) s.setTinfoilApiKey(keys.tinfoilApiKey);
     if (keys.customTranscriptionApiKey !== undefined)
       s.setCustomTranscriptionApiKey(keys.customTranscriptionApiKey);
     if (keys.cleanupCustomApiKey !== undefined) s.setCleanupCustomApiKey(keys.cleanupCustomApiKey);
@@ -1932,6 +1961,7 @@ export async function initializeSettings(): Promise<void> {
         openrouter,
         cortiClientId,
         cortiClientSecret,
+        tinfoil,
         customTx,
         customRx,
         bedrockAccessKeyId,
@@ -1949,6 +1979,7 @@ export async function initializeSettings(): Promise<void> {
         window.electronAPI.getOpenrouterKey?.(),
         window.electronAPI.getCortiClientId?.(),
         window.electronAPI.getCortiClientSecret?.(),
+        window.electronAPI.getTinfoilKey?.(),
         window.electronAPI.getCustomTranscriptionKey?.(),
         window.electronAPI.getCleanupCustomKey?.(),
         window.electronAPI.getBedrockAccessKeyId?.(),
@@ -1968,6 +1999,7 @@ export async function initializeSettings(): Promise<void> {
         openrouterApiKey: openrouter || "",
         cortiClientId: cortiClientId || "",
         cortiClientSecret: cortiClientSecret || "",
+        tinfoilApiKey: tinfoil || "",
         customTranscriptionApiKey: customTx || "",
         cleanupCustomApiKey: customRx || "",
         bedrockAccessKeyId: bedrockAccessKeyId || "",
@@ -2101,6 +2133,29 @@ export async function initializeSettings(): Promise<void> {
     } catch (err) {
       logger.warn(
         "Failed to sync dictionary on startup",
+        { error: (err as Error).message },
+        "settings"
+      );
+    }
+
+    // Sync snippets from SQLite <-> localStorage
+    try {
+      if (window.electronAPI.getSnippets) {
+        const currentSnippets = useSettingsStore.getState().snippets;
+        const dbSnippets = await window.electronAPI.getSnippets();
+        if (dbSnippets.length === 0 && currentSnippets.length > 0) {
+          await window.electronAPI.setSnippets?.(currentSnippets);
+          const normalizedSnippets = await window.electronAPI.getSnippets();
+          if (isBrowser) localStorage.setItem("snippets", JSON.stringify(normalizedSnippets));
+          useSettingsStore.setState({ snippets: normalizedSnippets });
+        } else if (dbSnippets.length > 0) {
+          if (isBrowser) localStorage.setItem("snippets", JSON.stringify(dbSnippets));
+          useSettingsStore.setState({ snippets: dbSnippets });
+        }
+      }
+    } catch (err) {
+      logger.warn(
+        "Failed to sync snippets on startup",
         { error: (err as Error).message },
         "settings"
       );

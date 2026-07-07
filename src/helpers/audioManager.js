@@ -23,15 +23,22 @@ import {
   isCloudCleanupMode,
   isCloudDictationAgentMode,
 } from "../stores/settingsStore";
+import { getTranscriptionProvider } from "../models/ModelRegistry";
 import { shouldSkipTranscriptionApiKey } from "./transcriptionAuth";
+import {
+  isSelfHostedTranscription,
+  resolveSelfHostedTranscriptionModel,
+} from "./selfHostedTranscription";
 import { detectAgentName } from "../config/agentDetection";
 import { resolveDictationRouteKind, resolveDictationAgentReachability } from "./dictationRouting";
 import { resolvePrompt } from "../config/prompts";
 import { syncService } from "../services/SyncService.js";
+import { evaluateFinishedRecording } from "./recordingValidation";
 import { matchesDictionaryPrompt } from "../utils/dictionaryEchoFilter.js";
 import { getDictionaryHintWords } from "../utils/snippets";
 
 const REASONING_CACHE_TTL = 30000; // 30 seconds
+const RECORDING_TIMESLICE_MS = 250; // flush chunks periodically so short recordings still carry audio frames. See #871.
 const REALTIME_MODELS = new Set(["gpt-4o-mini-transcribe", "gpt-4o-transcribe"]);
 
 function dictationAgentReachable(settings) {
@@ -158,6 +165,26 @@ const STREAMING_PROVIDERS = {
     onFinal: (cb) => window.electronAPI.onCortiFinalTranscript(cb),
     onError: (cb) => window.electronAPI.onCortiError(cb),
     onSessionEnd: (cb) => window.electronAPI.onCortiSessionEnd(cb),
+  },
+  "tinfoil-realtime": {
+    warmup: (opts) =>
+      window.electronAPI.dictationRealtimeWarmup({
+        ...opts,
+        provider: "tinfoil-realtime",
+        preview: getSettings().showTranscriptionPreview,
+      }),
+    start: (opts) =>
+      window.electronAPI.dictationRealtimeStart({
+        ...opts,
+        provider: "tinfoil-realtime",
+        preview: getSettings().showTranscriptionPreview,
+      }),
+    send: (buf) => window.electronAPI.dictationRealtimeSend(buf),
+    stop: () => window.electronAPI.dictationRealtimeStop(),
+    onPartial: (cb) => window.electronAPI.onDictationRealtimePartial(cb),
+    onFinal: (cb) => window.electronAPI.onDictationRealtimeFinal(cb),
+    onError: (cb) => window.electronAPI.onDictationRealtimeError(cb),
+    onSessionEnd: (cb) => window.electronAPI.onDictationRealtimeSessionEnd(cb),
   },
 };
 
@@ -310,6 +337,9 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
 
   getStreamingProviderName() {
     const s = getSettings();
+    if (s.cloudTranscriptionProvider === "tinfoil") {
+      return "tinfoil-realtime";
+    }
     if (s.cloudTranscriptionProvider === "corti" && s.cloudTranscriptionMode === "byok") {
       return "corti";
     }
@@ -402,6 +432,23 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     }
   }
 
+  // Briefly acquire and release the mic so the OS audio driver is warm before
+  // the first real recording, reducing cold-start empty captures. See #871.
+  async warmupMicDriver() {
+    if (this.micDriverWarmedUp) return;
+    // Skip while a recording is active so we don't double-acquire the mic. See #871.
+    if (this.isRecording || this.isProcessing || this.mediaRecorder?.state === "recording") return;
+    try {
+      const constraints = await this.getAudioConstraints();
+      const tempStream = await navigator.mediaDevices.getUserMedia(constraints);
+      tempStream.getTracks().forEach((track) => track.stop());
+      this.micDriverWarmedUp = true;
+      logger.debug("Microphone driver pre-warmed", {}, "audio");
+    } catch (e) {
+      logger.debug("Mic driver warmup failed (non-critical)", { error: e.message }, "audio");
+    }
+  }
+
   async startRecording(forceDefaultMic = false) {
     try {
       if (this.isRecording || this.isProcessing || this.mediaRecorder?.state === "recording") {
@@ -463,11 +510,15 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
 
       this.mediaRecorder = new MediaRecorder(micStream);
       this.audioChunks = [];
+      this._receivedAudioData = false;
       this.recordingStartTime = Date.now();
       this.recordingMimeType = this.mediaRecorder.mimeType || "audio/webm";
 
       this.mediaRecorder.ondataavailable = (event) => {
-        this.audioChunks.push(event.data);
+        if (event.data && event.data.size > 0) {
+          this._receivedAudioData = true;
+          this.audioChunks.push(event.data);
+        }
       };
 
       this.mediaRecorder.onstop = async () => {
@@ -502,12 +553,36 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
           ? (Date.now() - this.recordingStartTime) / 1000
           : null;
         this.recordingStartTime = null;
+
+        // Drop header-only / no-frame recordings before they crash FFmpeg. See #871.
+        const recordingCheck = evaluateFinishedRecording({
+          blobSize: audioBlob.size,
+          receivedAudioData: this._receivedAudioData,
+        });
+        if (!recordingCheck.usable) {
+          logger.info(
+            "Dropping degenerate recording before transcription",
+            {
+              blobSize: audioBlob.size,
+              reason: recordingCheck.reason,
+              receivedAudioData: this._receivedAudioData,
+            },
+            "audio"
+          );
+          this.isProcessing = false;
+          this._localSpeechGateState = null;
+          this.onStateChange?.({ isRecording: false, isProcessing: false });
+          this.onTranscriptionComplete?.({ success: true, text: "" });
+          micStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
         await this.processAudio(audioBlob, { durationSeconds });
 
         micStream.getTracks().forEach((track) => track.stop());
       };
 
-      this.mediaRecorder.start();
+      this.mediaRecorder.start(RECORDING_TIMESLICE_MS);
       this.isRecording = true;
       this.onStateChange?.({ isRecording: true, isProcessing: false });
 
@@ -1013,6 +1088,18 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
         throw err;
       }
       apiKey = null;
+    } else if (provider === "tinfoil") {
+      apiKey = s.tinfoilApiKey;
+      if (!apiKey?.trim()) {
+        apiKey = await window.electronAPI.getTinfoilKey?.();
+      }
+      if (!apiKey?.trim()) {
+        const err = new Error(
+          "Tinfoil API key not found. Please set your API key in the Control Panel."
+        );
+        err.code = "API_KEY_MISSING";
+        throw err;
+      }
     } else if (provider === "groq") {
       // Prefer store value (user-entered via UI) over main process (.env)
       apiKey = s.groqApiKey;
@@ -1493,6 +1580,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
           const reasonResult = await withSessionRefresh(async () => {
             const res = await window.electronAPI.cloudReason(processedText, {
               agentName,
+              promptMode: "cleanup",
               customDictionary: getDictionaryHintWords(settings),
               customPrompt: this.getCustomPrompt(),
               language: settings.preferredLanguage || "auto",
@@ -1989,6 +2077,8 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
   getTranscriptionModel() {
     try {
       const s = getSettings();
+      const selfHostedModel = resolveSelfHostedTranscriptionModel(s);
+      if (selfHostedModel) return selfHostedModel;
       const provider = s.cloudTranscriptionProvider || "openai";
       const trimmedModel = (s.cloudTranscriptionModel || "").trim();
 
@@ -2038,7 +2128,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     const remoteUrl = (s.remoteTranscriptionUrl || "").trim();
     const deployment = (deploymentName || "").trim();
 
-    const isSelfHosted = transcriptionMode === "self-hosted" && remoteUrl.length > 0;
+    const isSelfHosted = isSelfHostedTranscription(s);
     const isCustomEndpoint = isSelfHosted || currentProvider === "custom";
 
     if (
@@ -2354,9 +2444,19 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     const s = getSettings();
     if (s.useLocalWhisper) return false;
 
+    // Self-hosted transcription is batch HTTP to the user's server, never cloud realtime WS.
+    if (isSelfHostedTranscription(s)) return false;
+
     // Corti (BYOK) streams over its own WSS — independent of OpenWhispr Cloud.
     if (s.cloudTranscriptionProvider === "corti" && s.cloudTranscriptionMode === "byok") {
       return !!(s.cortiClientId && s.cortiClientSecret);
+    }
+
+    // Tinfoil realtime streams without an OpenWhispr account.
+    if (s.cloudTranscriptionProvider === "tinfoil") {
+      const provider = getTranscriptionProvider("tinfoil");
+      const model = provider?.models.find((m) => m.id === s.cloudTranscriptionModel);
+      return !!model?.streaming && !!s.tinfoilApiKey;
     }
 
     // For dictation/agent: respect sttConfig mode from the API — this allows
@@ -2549,7 +2649,8 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       }
 
       // 2. Set up audio pipeline so frames flow the instant WebSocket is ready.
-      //    Frames sent before WebSocket connects are silently dropped by sendAudio().
+      //    Frames sent before the connection is open are buffered (bounded) by
+      //    sendAudio(), not dropped.
       const audioContext = await this.getOrCreateAudioContext();
       this.streamingAudioContext = audioContext;
       this.streamingSource = audioContext.createMediaStreamSource(stream);
@@ -2907,6 +3008,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
           const reasonResult = await withSessionRefresh(async () => {
             const res = await window.electronAPI.cloudReason(finalText, {
               agentName,
+              promptMode: "cleanup",
               customDictionary: getDictionaryHintWords(stSettings),
               customPrompt: this.getCustomPrompt(),
               language: stSettings.preferredLanguage || "auto",
@@ -3049,7 +3151,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
         "streaming"
       );
     } else {
-      // Silence: still fire callback so media playback resumes.
+      // Silence: still fire callback to dismiss the preview and show the no-audio toast.
       this.onTranscriptionComplete?.({ success: true, text: "" });
     }
 

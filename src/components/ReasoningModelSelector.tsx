@@ -36,7 +36,15 @@ type CloudModelOption = {
 const OPENROUTER_TAB = "openrouter";
 const OPENROUTER_KEYS_URL = "https://openrouter.ai/keys";
 
-const CLOUD_PROVIDER_IDS = ["openai", "anthropic", "gemini", "groq", OPENROUTER_TAB, "custom"];
+const CLOUD_PROVIDER_IDS = [
+  "openai",
+  "anthropic",
+  "gemini",
+  "groq",
+  OPENROUTER_TAB,
+  "tinfoil",
+  "custom",
+];
 
 interface ReasoningModelSelectorProps {
   reasoningModel: string;
@@ -325,6 +333,8 @@ export default function ReasoningModelSelector({
   const setGroqApiKey = useSettingsStore((s) => s.setGroqApiKey);
   const openrouterApiKey = useSettingsStore((s) => s.openrouterApiKey);
   const setOpenrouterApiKey = useSettingsStore((s) => s.setOpenrouterApiKey);
+  const tinfoilApiKey = useSettingsStore((s) => s.tinfoilApiKey);
+  const setTinfoilApiKey = useSettingsStore((s) => s.setTinfoilApiKey);
   const [selectedMode, setSelectedMode] = useState<"cloud" | "local">(mode || "cloud");
   const [selectedCloudProvider, setSelectedCloudProvider] = useState("openai");
   const [selectedLocalProvider, setSelectedLocalProvider] = useState("qwen");
@@ -602,6 +612,21 @@ export default function ReasoningModelSelector({
                     <ApiKeyInput
                       apiKey={groqApiKey}
                       setApiKey={setGroqApiKey}
+                      label=""
+                      helpText=""
+                    />
+                  </div>
+                )}
+
+                {selectedCloudProvider === "tinfoil" && (
+                  <div className="space-y-2">
+                    <div className="flex items-baseline justify-between">
+                      <h4 className="font-medium text-foreground">{t("common.apiKey")}</h4>
+                      <GetApiKeyLink url="https://tinfoil.sh/inference?utm_source=referral&utm_campaign=openwhispr" />
+                    </div>
+                    <ApiKeyInput
+                      apiKey={tinfoilApiKey}
+                      setApiKey={setTinfoilApiKey}
                       label=""
                       helpText=""
                     />

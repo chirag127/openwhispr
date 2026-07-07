@@ -10,11 +10,13 @@ import { withRetry, createApiRetryStrategy } from "../utils/retry";
 import { API_ENDPOINTS, TOKEN_LIMITS, buildApiUrl, ensureV1Suffix } from "../config/constants";
 import logger from "../utils/logger";
 import { getSettings, isCloudCleanupMode } from "../stores/settingsStore";
+import { wrapCleanupTranscript } from "../config/prompts";
 import { streamText, stepCountIs } from "ai";
 import { getAIModel } from "./ai/providers";
 import { PROVIDER_REGISTRY, type ProviderContext } from "./ai/inferenceProviders";
 import { getConfiguredOpenAIBase } from "./ai/openaiBase";
 import { applyThinkingSuppression } from "./ai/thinkingSuppression";
+import { clearTinfoilClientCache } from "./ai/tinfoilClient";
 
 export type AgentStreamChunk =
   | { type: "content"; text: string }
@@ -62,7 +64,7 @@ class ReasoningService extends BaseReasoningService {
   }
 
   private async getApiKey(
-    provider: "openai" | "anthropic" | "gemini" | "groq" | "custom" | "openrouter"
+    provider: "openai" | "anthropic" | "gemini" | "groq" | "tinfoil" | "custom" | "openrouter"
   ): Promise<string> {
     if (provider === "custom") {
       let customKey = "";
@@ -101,6 +103,7 @@ class ReasoningService extends BaseReasoningService {
           gemini: () => window.electronAPI.getGeminiKey(),
           groq: () => window.electronAPI.getGroqKey(),
           openrouter: () => window.electronAPI.getOpenrouterKey(),
+          tinfoil: () => window.electronAPI.getTinfoilKey?.(),
         };
         apiKey = (await keyGetters[provider]()) ?? undefined;
 
@@ -143,8 +146,11 @@ class ReasoningService extends BaseReasoningService {
     config: ReasoningConfig,
     providerName: string
   ): Promise<string> {
+    // No systemPrompt override means the default cleanup path: a deterministic
+    // transform, so zero temperature and a delimited transcript.
+    const isCleanup = !config.systemPrompt;
     const systemPrompt = config.systemPrompt || this.getSystemPrompt(agentName);
-    const userPrompt = text;
+    const userPrompt = isCleanup ? wrapCleanupTranscript(text) : text;
 
     const messages = [
       { role: "system", content: systemPrompt },
@@ -154,7 +160,7 @@ class ReasoningService extends BaseReasoningService {
     const requestBody: any = {
       model,
       messages,
-      temperature: config.temperature ?? 0.3,
+      temperature: config.temperature ?? (isCleanup ? 0 : 0.3),
       max_tokens:
         config.maxTokens ||
         Math.max(
@@ -167,6 +173,14 @@ class ReasoningService extends BaseReasoningService {
           )
         ),
     };
+
+    // gpt-oss defaults to medium reasoning effort; low cuts hidden reasoning
+    // tokens (latency) and the tendency to answer the transcript instead of
+    // cleaning it. applyThinkingSuppression still wins when thinking is
+    // disabled by the user.
+    if (isCleanup && model.includes("gpt-oss")) {
+      requestBody.reasoning_effort = "low";
+    }
 
     applyThinkingSuppression(requestBody, model, providerName, config);
 
@@ -336,7 +350,15 @@ class ReasoningService extends BaseReasoningService {
     provider: string,
     config: ReasoningConfig & { systemPrompt: string }
   ): AsyncGenerator<string, void, unknown> {
-    const cloudProviders = ["openai", "groq", "gemini", "anthropic", "custom", "openrouter"];
+    const cloudProviders = [
+      "openai",
+      "groq",
+      "gemini",
+      "anthropic",
+      "tinfoil",
+      "custom",
+      "openrouter",
+    ];
     const isLocalProvider = !cloudProviders.includes(provider);
 
     const settings = getSettings();
@@ -358,12 +380,7 @@ class ReasoningService extends BaseReasoningService {
       endpoint = `http://127.0.0.1:${serverResult.port}/v1/chat/completions`;
     } else {
       const providerKey = provider as
-        | "openai"
-        | "groq"
-        | "gemini"
-        | "anthropic"
-        | "custom"
-        | "openrouter";
+        "openai" | "groq" | "gemini" | "anthropic" | "tinfoil" | "custom" | "openrouter";
       const overrideKey = providerKey === "custom" ? config.customApiKey?.trim() : "";
       apiKey = overrideKey || (await this.getApiKey(providerKey));
 
@@ -377,6 +394,8 @@ class ReasoningService extends BaseReasoningService {
         case "openrouter":
           endpoint = buildApiUrl(API_ENDPOINTS.OPENROUTER_BASE, "/chat/completions");
           break;
+        case "tinfoil":
+          throw new Error("Tinfoil streaming must use the verified SDK transport");
         case "openai":
         case "custom":
           endpoint = buildApiUrl(
@@ -548,7 +567,15 @@ class ReasoningService extends BaseReasoningService {
       );
     }
 
-    const cloudProviders = ["openai", "groq", "gemini", "anthropic", "custom", "openrouter"];
+    const cloudProviders = [
+      "openai",
+      "groq",
+      "gemini",
+      "anthropic",
+      "tinfoil",
+      "custom",
+      "openrouter",
+    ];
     const isLocalProvider = !cloudProviders.includes(provider);
 
     const settings = getSettings();
@@ -578,12 +605,7 @@ class ReasoningService extends BaseReasoningService {
       baseURL = `http://127.0.0.1:${serverResult.port}/v1`;
     } else {
       const providerKey = provider as
-        | "openai"
-        | "groq"
-        | "gemini"
-        | "anthropic"
-        | "custom"
-        | "openrouter";
+        "openai" | "groq" | "gemini" | "anthropic" | "tinfoil" | "custom" | "openrouter";
       const overrideKey = providerKey === "custom" ? config.customApiKey?.trim() : "";
       apiKey = overrideKey || (await this.getApiKey(providerKey));
       baseURL =
@@ -596,7 +618,7 @@ class ReasoningService extends BaseReasoningService {
     const apiConfig = getOpenAiApiConfig(model);
 
     const aiProvider = isLocalProvider || isLanCleanup ? "local" : provider;
-    const aiModel = getAIModel(aiProvider, model, apiKey, baseURL);
+    const aiModel = await getAIModel(aiProvider, model, apiKey, baseURL);
 
     const modelDef = getCloudModel(model);
     const userSuppressesThinking = config.disableThinking === true && !!modelDef?.supportsThinking;
@@ -878,6 +900,7 @@ class ReasoningService extends BaseReasoningService {
       const anthropicKey = await window.electronAPI?.getAnthropicKey?.();
       const geminiKey = await window.electronAPI?.getGeminiKey?.();
       const groqKey = await window.electronAPI?.getGroqKey?.();
+      const tinfoilKey = await window.electronAPI?.getTinfoilKey?.();
       const localAvailable = await window.electronAPI?.checkLocalReasoningAvailable?.();
 
       logger.logReasoning("API_KEY_CHECK", {
@@ -885,10 +908,11 @@ class ReasoningService extends BaseReasoningService {
         hasAnthropic: !!anthropicKey,
         hasGemini: !!geminiKey,
         hasGroq: !!groqKey,
+        hasTinfoil: !!tinfoilKey,
         hasLocal: !!localAvailable,
       });
 
-      return !!(openaiKey || anthropicKey || geminiKey || groqKey || localAvailable);
+      return !!(openaiKey || anthropicKey || geminiKey || groqKey || tinfoilKey || localAvailable);
     } catch (error) {
       logger.logReasoning("API_KEY_CHECK_ERROR", {
         error: (error as Error).message,
@@ -900,15 +924,20 @@ class ReasoningService extends BaseReasoningService {
   }
 
   clearApiKeyCache(
-    provider?: "openai" | "anthropic" | "gemini" | "groq" | "mistral" | "custom" | "openrouter"
+    provider?:
+      "openai" | "anthropic" | "gemini" | "groq" | "mistral" | "tinfoil" | "custom" | "openrouter"
   ): void {
     if (provider) {
       if (provider !== "custom") {
         this.apiKeyCache.delete(provider);
       }
+      if (provider === "tinfoil") {
+        clearTinfoilClientCache();
+      }
       logger.logReasoning("API_KEY_CACHE_CLEARED", { provider });
     } else {
       this.apiKeyCache.clear();
+      clearTinfoilClientCache();
       logger.logReasoning("API_KEY_CACHE_CLEARED", { provider: "all" });
     }
   }

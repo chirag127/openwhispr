@@ -14,6 +14,7 @@ import vertexIcon from "@/assets/icons/providers/vertex.svg";
 import xaiIcon from "@/assets/icons/providers/xai.svg";
 import cortiIcon from "@/assets/icons/providers/corti.svg";
 import openrouterIcon from "@/assets/icons/providers/openrouter.svg";
+import tinfoilIcon from "@/assets/icons/providers/tinfoil.svg";
 
 export const PROVIDER_ICONS: Record<string, string> = {
   openai: openaiIcon,
@@ -33,6 +34,7 @@ export const PROVIDER_ICONS: Record<string, string> = {
   xai: xaiIcon,
   corti: cortiIcon,
   openrouter: openrouterIcon,
+  tinfoil: tinfoilIcon,
 };
 
 export function getProviderIcon(provider: string): string | undefined {
@@ -47,6 +49,7 @@ export const MONOCHROME_PROVIDERS = [
   "xai",
   "corti",
   "openrouter",
+  "tinfoil",
 ] as const;
 
 export function isMonochromeProvider(provider: string): boolean {
@@ -57,8 +60,11 @@ export function isMonochromeProvider(provider: string): boolean {
 const REMOTE_PROVIDER_ALIASES: Record<string, string> = {
   google: "gemini",
   "meta-llama": "llama",
+  meta: "llama",
   mistralai: "mistral",
   "x-ai": "xai",
+  amazon: "bedrock",
+  microsoft: "azure",
 };
 
 // Resolves the icon for a remote provider prefix (e.g. "openai" from "openai/gpt-4").

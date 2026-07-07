@@ -166,9 +166,10 @@ export default function OpenAICompatiblePanel({
 
         if (isMountedRef.current && latestBaseRef.current === normalized) {
           setModelOptions(mapped);
-          if (model && mapped.length > 0 && !mapped.some((m) => m.value === model)) {
-            setModel("");
-          }
+          // `/models` is a discovery aid, not an allowlist — keep the user's
+          // chosen id even if it's absent (it may still be valid, or belong to
+          // a provider they're switching away from). Invalid ids surface a
+          // clear API error at request time instead of being silently wiped.
           setModelsError(null);
           lastLoadedBaseRef.current = normalized;
         }
@@ -192,7 +193,7 @@ export default function OpenAICompatiblePanel({
         }
       }
     },
-    [baseUrl, apiKey, model, setModel, t]
+    [baseUrl, apiKey, t]
   );
 
   useEffect(() => {
