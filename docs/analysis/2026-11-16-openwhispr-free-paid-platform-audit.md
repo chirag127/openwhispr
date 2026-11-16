@@ -72,6 +72,7 @@ The desktop pricing page is the same on every OS, so Windows has no platform-spe
 - #1641 remote desktop pastes as "v".
 - #2468 GPU banner stays after CUDA install.
 - #1418 whisper-server crashes on Ivy Bridge.
+- **New:** #3264 mouse button 4/5 hotkeys are rejected as macOS-only (`src/utils/hotkeyValidator.ts:593-600`), although the macOS path already supports them.
 
 ## 3. Artificial gate: connectors
 
@@ -142,6 +143,7 @@ The existing #2741 covers the broader Android release request and already mentio
 | 3251 | Free plan advertises 5 meeting hours/month, but the app has no meeting-hours meter               | Product/usage          | -            |
 | 3252 | Android Local Mode has no on-device text model, so cleanup/notes/chat fall back to Cloud         | Parity                 | #3257 (docs) |
 | 3253 | Mobile CI validates an iOS bundle only; Android bundling is not checked                          | CI                     | #3259        |
+| 3264 | [Windows] Mouse button 4/5 hotkeys are rejected as macOS-only                                    | Windows feature gap    | -            |
 
 ## 8. Pull requests opened
 
