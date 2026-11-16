@@ -164,11 +164,11 @@ The existing #2741 covers the broader Android release request and already mentio
 
 ## 10. Verification log (2026-11-16)
 
-- PR #3255 (README): quality passed.
-- PR #3256 (LOCAL_WHISPER_SETUP): quality passed.
-- PR #3257 (mobile parity docs): Mobile static initially failed Prettier; fixed and re-run, static and bundle jobs pass.
-- PR #3259 (Android bundle): Mobile bundles passed, including the new Android export.
-- PR #3258 (connectors): the quality job was still running at the time of this report. The changed test files pass `node --check`, and Prettier reports no issues.
+- PR #3255 (README): all checks pass.
+- PR #3256 (LOCAL_WHISPER_SETUP): all checks pass.
+- PR #3257 (mobile parity docs): Mobile static initially failed Prettier; fixed and re-run, all checks pass.
+- PR #3259 (Android bundle): all checks pass, including the new Android export in the Mobile bundles job.
+- PR #3258 (connectors): the first CI run failed typecheck on a second `connectorPlan` reference. The fix removes the dead connector `hasPlan` capability; `npm run typecheck` then passed, and 72 capability/section tests plus 64 connector-tool tests passed locally. A fresh CI run is in progress.
 
 ## 11. Method and caveats
 
